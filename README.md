@@ -4,8 +4,6 @@ Welcome to the Inclusive Body Composition Tracker, an empowering and unique fitn
 Inclusive Body Composition Tracker 🌈💪
 Version: 0.6 (Beta)
 
-Welcome to the Inclusive Body Composition Tracker, an empowering and unique fitness application designed with the diverse needs of transgender and intersex individuals in mind. This app goes beyond traditional binary calculations to offer a more personalized and affirming way to understand and track your body's journey.
-
 ✨ What Makes This App Special?
 Most body composition calculators assume a binary sex, which doesn't accurately reflect the complexities of body changes for transgender and intersex people, especially those undergoing hormone replacement therapy (HRT) or gender-affirming surgeries. Our app addresses this by introducing a groundbreaking "Femininity Crossfade" feature.
 

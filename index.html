@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { initializeApp } from 'firebase/app';
+import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, collection, addDoc, query, orderBy, onSnapshot, serverTimestamp, Timestamp } from 'firebase/firestore';
 import { Line } from 'react-chartjs-2';
@@ -14,9 +14,16 @@ const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__f
 const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
 // Initialize Firebase (will be done once in useEffect)
-let app;
-let db;
-let auth;
+let app = null;
+let db = null;
+let auth = null;
+
+// Check if Firebase app is already initialized
+if (!getApps().length) {
+    app = initializeApp(firebaseConfig);
+    db = getFirestore(app);
+    auth = getAuth(app);
+}
 
 function App() {
     const [weight, setWeight] = useState('');
@@ -38,7 +45,6 @@ function App() {
     const [message, setMessage] = useState('');
     const [unitSystem, setUnitSystem] = useState('imperial'); // 'imperial' or 'metric'
     const [inputDate, setInputDate] = useState(new Date().toISOString().split('T')[0]); // Default to current date
-
     const isFirebaseInitialized = useRef(false);
     const appVersion = "0.6"; // Define the app version
 
@@ -47,10 +53,13 @@ function App() {
         const initializeFirebase = async () => {
             if (isFirebaseInitialized.current) return;
 
+            // Use the already initialized app if it exists
+            if (!app) {
+                 app = initializeApp(firebaseConfig);
+                 db = getFirestore(app);
+                 auth = getAuth(app);
+            }
             try {
-                app = initializeApp(firebaseConfig);
-                db = getFirestore(app);
-                auth = getAuth(app);
 
                 // Sign in with custom token if available, otherwise anonymously
                 if (initialAuthToken) {

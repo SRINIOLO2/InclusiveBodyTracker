@@ -1,7 +1,7 @@
 # InclusiveBodyTracker
 Welcome to the Inclusive Body Composition Tracker, an empowering and unique fitness application designed with the diverse needs of transgender and intersex individuals in mind. This app goes beyond traditional binary calculations to offer a more personalized and affirming way to understand and track your body's journey.
 
-Inclusive Body Composition Tracker 🌈💪
+[Inclusive Body Composition Tracker 🌈💪
 Version: 0.6 (Beta)
 
 ✨ What Makes This App Special?
@@ -68,3 +68,4 @@ Track Your Journey: View your progress in the chart and historical table, and ex
 This app is more than just a tracker; it's a supportive companion on your unique fitness and transition journey. We believe everyone deserves tools that truly see and support them.
 
 Feel free to explore, contribute, and share your feedback!
+](https://g.co/gemini/share/c85d5824604a)

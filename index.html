@@ -1,0 +1,663 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, collection, addDoc, query, orderBy, onSnapshot, serverTimestamp, Timestamp } from 'firebase/firestore';
+import { Line } from 'react-chartjs-2';
+import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend } from 'chart.js';
+
+// Register Chart.js components
+ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend);
+
+// Define global variables for Firebase configuration (provided by the environment)
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+// Initialize Firebase (will be done once in useEffect)
+let app;
+let db;
+let auth;
+
+function App() {
+    const [weight, setWeight] = useState('');
+    const [height, setHeight] = useState('');
+    const [age, setAge] = useState('');
+    const [neckCircumference, setNeckCircumference] = useState('');
+    const [waistCircumference, setWaistCircumference] = useState('');
+    const [hipCircumference, setHipCircumference] = useState(''); // Only for female formula
+    const [femininityPercentage, setFemininityPercentage] = useState(50); // 0-100, 0=Masculine, 100=Feminine
+    const [calculatedBMI, setCalculatedBMI] = useState(null);
+    const [calculatedBF, setCalculatedBF] = useState(null);
+    const [calculatedLeanMass, setCalculatedLeanMass] = useState(null);
+    const [calculatedFatMass, setCalculatedFatMass] = useState(null);
+    const [notes, setNotes] = useState('');
+    const [history, setHistory] = useState([]);
+    const [userId, setUserId] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
+    const [message, setMessage] = useState('');
+    const [unitSystem, setUnitSystem] = useState('imperial'); // 'imperial' or 'metric'
+    const [inputDate, setInputDate] = useState(new Date().toISOString().split('T')[0]); // Default to current date
+
+    const isFirebaseInitialized = useRef(false);
+    const appVersion = "0.6"; // Define the app version
+
+    // Initialize Firebase and set up authentication
+    useEffect(() => {
+        const initializeFirebase = async () => {
+            if (isFirebaseInitialized.current) return;
+
+            try {
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                // Sign in with custom token if available, otherwise anonymously
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                // Listen for auth state changes
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        setUserId(user.uid);
+                        setLoading(false);
+                    } else {
+                        setUserId(crypto.randomUUID()); // Fallback for unauthenticated or anonymous users
+                        setLoading(false);
+                    }
+                });
+
+                isFirebaseInitialized.current = true;
+            } catch (err) {
+                console.error("Firebase initialization error:", err);
+                setError("Failed to initialize Firebase. Please try again later.");
+                setLoading(false);
+            }
+        };
+
+        initializeFirebase();
+    }, []);
+
+    // Fetch data from Firestore when userId is available
+    useEffect(() => {
+        if (!userId || !db) return;
+
+        const q = query(
+            collection(db, `artifacts/${appId}/users/${userId}/bodyCompositionData`),
+            orderBy('date', 'desc') // Order by date descending for history
+        );
+
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const data = snapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data(),
+                // If customDate is present, use it, otherwise fall back to serverTimestamp
+                date: doc.data().customDate || doc.data().date?.toDate().toISOString().split('T')[0] || 'N/A'
+            }));
+            setHistory(data);
+        }, (err) => {
+            console.error("Error fetching data:", err);
+            setError("Failed to load historical data.");
+        });
+
+        return () => unsubscribe(); // Cleanup listener on component unmount
+    }, [userId]); // Depend on userId to re-run when auth state is ready
+
+    // Conversion functions
+    const kgToLbs = (kg) => kg * 2.20462;
+    const lbsToKg = (lbs) => lbs / 2.20462;
+    const cmToInches = (cm) => cm * 0.393701;
+    const inchesToCm = (inches) => inches / 0.393701;
+
+    // Function to calculate BMI (always uses lbs and inches internally)
+    const calculateBMI = (weightLbs, heightInches) => {
+        if (!weightLbs || !heightInches) return null;
+        return (weightLbs / (heightInches * heightInches)) * 703;
+    };
+
+    // Function to calculate Body Fat Percentage using U.S. Navy Method (always uses inches internally)
+    const calculateBodyFatNavyMethod = (weightLbs, heightInches, neckInches, waistInches, hipInches, femininity) => {
+        if (!weightLbs || !heightInches || !neckInches || !waistInches) return null;
+
+        // Rounding rules for U.S. Navy Method
+        const roundedNeck = Math.ceil(neckInches * 2) / 2; // round up to nearest 0.5 inch
+        const roundedWaist = Math.floor(waistInches * 2) / 2; // round down to nearest 0.5 inch
+        const roundedHeight = Math.round(heightInches * 2) / 2; // round to nearest 0.5 inch
+
+        // Male formula
+        const bfMale = 86.010 * Math.log10(roundedWaist - roundedNeck) - 70.041 * Math.log10(roundedHeight) + 36.76;
+
+        // Female formula (requires hip circumference)
+        let bfFemale = null;
+        if (hipInches) {
+            const roundedHip = Math.floor(hipInches * 2) / 2; // round down to nearest 0.5 inch
+            bfFemale = 163.205 * Math.log10(roundedWaist + roundedHip - roundedNeck) - 97.684 * Math.log10(roundedHeight) - 78.387;
+        }
+
+        // Interpolate based on femininity percentage
+        if (bfFemale === null) {
+            // If hip is not provided, we can't calculate female formula, so just use male.
+            // Or, we could default to a more general formula if available, but for now,
+            // we'll highlight that hip is needed for full interpolation.
+            return bfMale; // Fallback to male if female calculation is not possible
+        }
+
+        // Linear interpolation: 0% femininity = 100% Male, 100% femininity = 100% Female
+        const interpolationFactor = femininity / 100;
+        const interpolatedBF = bfMale * (1 - interpolationFactor) + bfFemale * interpolationFactor;
+
+        return interpolatedBF;
+    };
+
+    const handleCalculate = () => {
+        setError('');
+        setMessage('');
+
+        let w = parseFloat(weight);
+        let h = parseFloat(height);
+        let n = parseFloat(neckCircumference);
+        let wa = parseFloat(waistCircumference);
+        let hi = parseFloat(hipCircumference);
+        const a = parseFloat(age);
+
+        if (isNaN(w) || isNaN(h) || isNaN(a) || isNaN(n) || isNaN(wa)) {
+            setError('Please enter valid numbers for all required fields (Weight, Height, Age, Neck, Waist).');
+            return;
+        }
+
+        // Convert to imperial units if current system is metric
+        let weightLbs = w;
+        let heightInches = h;
+        let neckInches = n;
+        let waistInches = wa;
+        let hipInches = hi;
+
+        if (unitSystem === 'metric') {
+            weightLbs = kgToLbs(w);
+            heightInches = cmToInches(h);
+            neckInches = cmToInches(n);
+            waistInches = cmToInches(wa);
+            hipInches = hi ? cmToInches(hi) : null;
+        }
+
+        // Calculate BMI
+        const bmi = calculateBMI(weightLbs, heightInches);
+        setCalculatedBMI(bmi ? bmi.toFixed(2) : null);
+
+        // Calculate Body Fat
+        const bf = calculateBodyFatNavyMethod(weightLbs, heightInches, neckInches, waistInches, hipInches, femininityPercentage);
+        setCalculatedBF(bf ? bf.toFixed(2) : null);
+
+        // Calculate Lean Mass and Fat Mass if BF is available
+        if (bf !== null) {
+            const fatMassLbs = (bf / 100) * weightLbs;
+            const leanMassLbs = weightLbs - fatMassLbs;
+
+            // Convert back to metric if unit system is metric
+            setCalculatedFatMass(unitSystem === 'metric' ? lbsToKg(fatMassLbs).toFixed(2) : fatMassLbs.toFixed(2));
+            setCalculatedLeanMass(unitSystem === 'metric' ? lbsToKg(leanMassLbs).toFixed(2) : leanMassLbs.toFixed(2));
+        } else {
+            setCalculatedFatMass(null);
+            setCalculatedLeanMass(null);
+        }
+    };
+
+    const handleSave = async () => {
+        setError('');
+        setMessage('');
+
+        if (!userId) {
+            setError("User not authenticated. Please wait or refresh.");
+            return;
+        }
+
+        if (calculatedBMI === null || calculatedBF === null) {
+            setError("Please calculate body composition before saving.");
+            return;
+        }
+
+        try {
+            // Use the inputDate if provided, otherwise use serverTimestamp
+            const timestampToSave = inputDate ? inputDate : serverTimestamp();
+
+            await addDoc(collection(db, `artifacts/${appId}/users/${userId}/bodyCompositionData`), {
+                date: serverTimestamp(), // Keep serverTimestamp for ordering
+                customDate: inputDate, // Store the user-selected date string
+                weight: parseFloat(weight),
+                height: parseFloat(height),
+                age: parseInt(age),
+                neckCircumference: parseFloat(neckCircumference),
+                waistCircumference: parseFloat(waistCircumference),
+                hipCircumference: parseFloat(hipCircumference || 0), // Store 0 if not provided
+                femininityPercentage: parseInt(femininityPercentage),
+                calculatedBMI: parseFloat(calculatedBMI),
+                calculatedBF: parseFloat(calculatedBF),
+                calculatedLeanMass: parseFloat(calculatedLeanMass),
+                calculatedFatMass: parseFloat(calculatedFatMass),
+                notes: notes,
+                unitSystem: unitSystem, // Save the unit system used for this entry
+            });
+            setMessage("Data saved successfully!");
+            setNotes(''); // Clear notes after saving
+            setInputDate(new Date().toISOString().split('T')[0]); // Reset date to current
+        } catch (e) {
+            console.error("Error adding document: ", e);
+            setError("Failed to save data. Please try again.");
+        }
+    };
+
+    const handleExportToCSV = () => {
+        if (history.length === 0) {
+            setError("No data to export.");
+            return;
+        }
+
+        // Define CSV headers
+        const headers = [
+            'Date',
+            `Weight (${unitSystem === 'imperial' ? 'lbs' : 'kg'})`,
+            `Height (${unitSystem === 'imperial' ? 'in' : 'cm'})`,
+            'Age',
+            `Neck Circumference (${unitSystem === 'imperial' ? 'in' : 'cm'})`,
+            `Waist Circumference (${unitSystem === 'imperial' ? 'in' : 'cm'})`,
+            `Hip Circumference (${unitSystem === 'imperial' ? 'in' : 'cm'})`,
+            'Femininity Percentage',
+            'BMI',
+            'Body Fat %',
+            `Lean Mass (${unitSystem === 'imperial' ? 'lbs' : 'kg'})`,
+            `Fat Mass (${unitSystem === 'imperial' ? 'lbs' : 'kg'})`,
+            'Notes',
+            'Unit System'
+        ];
+
+        // Format data rows
+        const csvRows = history.map(entry => {
+            // Ensure values are strings and handle commas in notes by enclosing in quotes
+            const formattedNotes = `"${(entry.notes || '').replace(/"/g, '""')}"`; // Escape double quotes
+
+            // Convert to currently selected unit system for export display
+            const displayWeight = entry.unitSystem === unitSystem ? entry.weight :
+                                  unitSystem === 'imperial' ? kgToLbs(entry.weight).toFixed(2) : lbsToKg(entry.weight).toFixed(2);
+            const displayHeight = entry.unitSystem === unitSystem ? entry.height :
+                                  unitSystem === 'imperial' ? cmToInches(entry.height).toFixed(2) : inchesToCm(entry.height).toFixed(2);
+            const displayNeck = entry.unitSystem === unitSystem ? entry.neckCircumference :
+                                unitSystem === 'imperial' ? cmToInches(entry.neckCircumference).toFixed(2) : inchesToCm(entry.neckCircumference).toFixed(2);
+            const displayWaist = entry.unitSystem === unitSystem ? entry.waistCircumference :
+                                 unitSystem === 'imperial' ? cmToInches(entry.waistCircumference).toFixed(2) : inchesToCm(entry.waistCircumference).toFixed(2);
+            const displayHip = entry.unitSystem === unitSystem ? (entry.hipCircumference || '') :
+                               (entry.hipCircumference ? (unitSystem === 'imperial' ? cmToInches(entry.hipCircumference).toFixed(2) : inchesToCm(entry.hipCircumference).toFixed(2)) : '');
+
+            return [
+                entry.date,
+                displayWeight,
+                displayHeight,
+                entry.age,
+                displayNeck,
+                displayWaist,
+                displayHip,
+                entry.femininityPercentage,
+                entry.calculatedBMI,
+                entry.calculatedBF,
+                entry.calculatedLeanMass,
+                entry.calculatedFatMass,
+                formattedNotes,
+                entry.unitSystem
+            ].join(',');
+        });
+
+        // Combine headers and rows
+        const csvContent = [
+            headers.join(','),
+            ...csvRows
+        ].join('\n');
+
+        // Create a Blob and trigger download
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = 'body_composition_data.csv';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(link.href);
+        setMessage("Data exported successfully to body_composition_data.csv!");
+    };
+
+
+    // Prepare data for Chart.js
+    const chartData = {
+        labels: history.map(entry => entry.date).reverse(), // Reverse to show oldest first
+        datasets: [
+            {
+                label: `Weight (${unitSystem === 'imperial' ? 'lbs' : 'kg'})`,
+                data: history.map(entry => unitSystem === 'imperial' ? entry.weight : lbsToKg(entry.weight)).reverse(),
+                borderColor: 'rgb(75, 192, 192)',
+                backgroundColor: 'rgba(75, 192, 192, 0.5)',
+                yAxisID: 'y',
+            },
+            {
+                label: 'Body Fat %',
+                data: history.map(entry => entry.calculatedBF).reverse(),
+                borderColor: 'rgb(255, 99, 132)',
+                backgroundColor: 'rgba(255, 99, 132, 0.5)',
+                yAxisID: 'y1',
+            },
+            {
+                label: 'Femininity %',
+                data: history.map(entry => entry.femininityPercentage).reverse(),
+                borderColor: 'rgb(153, 102, 255)',
+                backgroundColor: 'rgba(153, 102, 255, 0.5)',
+                yAxisID: 'y2',
+            }
+        ],
+    };
+
+    const chartOptions = {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: {
+            mode: 'index',
+            intersect: false,
+        },
+        stacked: false,
+        plugins: {
+            title: {
+                display: true,
+                text: 'Body Composition Trends',
+            },
+        },
+        scales: {
+            x: {
+                title: {
+                    display: true,
+                    text: 'Date',
+                },
+            },
+            y: {
+                type: 'linear',
+                display: true,
+                position: 'left',
+                title: {
+                    display: true,
+                    text: `Weight (${unitSystem === 'imperial' ? 'lbs' : 'kg'})`,
+                },
+            },
+            y1: {
+                type: 'linear',
+                display: true,
+                position: 'right',
+                title: {
+                    display: true,
+                    text: 'Body Fat %',
+                },
+                grid: {
+                    drawOnChartArea: false, // Only draw grid lines for the first axis
+                },
+            },
+            y2: {
+                type: 'linear',
+                display: true,
+                position: 'right',
+                title: {
+                    display: true,
+                    text: 'Femininity %',
+                },
+                grid: {
+                    drawOnChartArea: false, // Only draw grid lines for the first axis
+                },
+            },
+        },
+    };
+
+    if (loading) {
+        return (
+            <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-purple-100 to-pink-100 p-4">
+                <div className="text-xl font-semibold text-purple-700">Loading app...</div>
+            </div>
+        );
+    }
+
+    return (
+        <div className="min-h-screen bg-gradient-to-br from-purple-100 to-pink-100 flex flex-col items-center justify-center p-4">
+            <div className="bg-white p-8 rounded-xl shadow-2xl w-full max-w-4xl space-y-8">
+                <h1 className="text-4xl font-extrabold text-center text-purple-800 mb-6">
+                    Inclusive Body Composition Tracker
+                    <span className="block text-base font-medium text-gray-500 mt-2">Version {appVersion}</span>
+                </h1>
+
+                {error && (
+                    <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md relative" role="alert">
+                        <strong className="font-bold">Error!</strong>
+                        <span className="block sm:inline"> {error}</span>
+                    </div>
+                )}
+                {message && (
+                    <div className="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md relative" role="alert">
+                        <strong className="font-bold">Success!</strong>
+                        <span className="block sm:inline"> {message}</span>
+                    </div>
+                )}
+
+                <div className="flex justify-center mb-6">
+                    <button
+                        onClick={() => setUnitSystem('imperial')}
+                        className={`px-6 py-2 rounded-l-lg font-semibold transition-colors duration-200 ${unitSystem === 'imperial' ? 'bg-purple-600 text-white shadow-md' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
+                    >
+                        Imperial (lbs, in)
+                    </button>
+                    <button
+                        onClick={() => setUnitSystem('metric')}
+                        className={`px-6 py-2 rounded-r-lg font-semibold transition-colors duration-200 ${unitSystem === 'metric' ? 'bg-purple-600 text-white shadow-md' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
+                    >
+                        Metric (kg, cm)
+                    </button>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="space-y-4">
+                        <h2 className="text-2xl font-bold text-purple-700">Your Measurements</h2>
+                        <div>
+                            <label htmlFor="inputDate" className="block text-sm font-medium text-gray-700">Date</label>
+                            <input
+                                type="date"
+                                id="inputDate"
+                                value={inputDate}
+                                onChange={(e) => setInputDate(e.target.value)}
+                                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-purple-500 focus:border-purple-500 sm:text-sm"
+                            />
+                        </div>
+                        <div>
+                            <label htmlFor="weight" className="block text-sm font-medium text-gray-700">Weight ({unitSystem === 'imperial' ? 'lbs' : 'kg'})</label>
+                            <input
+                                type="number"
+                                id="weight"
+                                value={weight}
+                                onChange={(e) => setWeight(e.target.value)}
+                                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-purple-500 focus:border-purple-500 sm:text-sm"
+                                placeholder={unitSystem === 'imperial' ? 'e.g., 150' : 'e.g., 68'}
+                            />
+                        </div>
+                        <div>
+                            <label htmlFor="height" className="block text-sm font-medium text-gray-700">Height ({unitSystem === 'imperial' ? 'inches' : 'cm'})</label>
+                            <input
+                                type="number"
+                                id="height"
+                                value={height}
+                                onChange={(e) => setHeight(e.target.value)}
+                                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-purple-500 focus:border-purple-500 sm:text-sm"
+                                placeholder={unitSystem === 'imperial' ? 'e.g., 68' : 'e.g., 173'}
+                            />
+                        </div>
+                        <div>
+                            <label htmlFor="age" className="block text-sm font-medium text-gray-700">Age</label>
+                            <input
+                                type="number"
+                                id="age"
+                                value={age}
+                                onChange={(e) => setAge(e.target.value)}
+                                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-purple-500 focus:border-purple-500 sm:text-sm"
+                                placeholder="e.g., 30"
+                            />
+                        </div>
+                        <div>
+                            <label htmlFor="neck" className="block text-sm font-medium text-gray-700">Neck Circumference ({unitSystem === 'imperial' ? 'inches' : 'cm'})</label>
+                            <input
+                                type="number"
+                                id="neck"
+                                value={neckCircumference}
+                                onChange={(e) => setNeckCircumference(e.target.value)}
+                                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-purple-500 focus:border-purple-500 sm:text-sm"
+                                placeholder={unitSystem === 'imperial' ? 'e.g., 15' : 'e.g., 38'}
+                            />
+                        </div>
+                        <div>
+                            <label htmlFor="waist" className="block text-sm font-medium text-gray-700">Waist Circumference ({unitSystem === 'imperial' ? 'inches' : 'cm'})</label>
+                            <input
+                                type="number"
+                                id="waist"
+                                value={waistCircumference}
+                                onChange={(e) => setWaistCircumference(e.target.value)}
+                                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-purple-500 focus:border-purple-500 sm:text-sm"
+                                placeholder={unitSystem === 'imperial' ? 'e.g., 30' : 'e.g., 76'}
+                            />
+                        </div>
+                        <div>
+                            <label htmlFor="hip" className="block text-sm font-medium text-gray-700">Hip Circumference ({unitSystem === 'imperial' ? 'inches' : 'cm'}) - *For Feminine Calculation*</label>
+                            <input
+                                type="number"
+                                id="hip"
+                                value={hipCircumference}
+                                onChange={(e) => setHipCircumference(e.target.value)}
+                                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-purple-500 focus:border-purple-500 sm:text-sm"
+                                placeholder={unitSystem === 'imperial' ? 'e.g., 38' : 'e.g., 96'}
+                            />
+                        </div>
+                    </div>
+
+                    <div className="space-y-4">
+                        <h2 className="text-2xl font-bold text-purple-700">Femininity Crossfade</h2>
+                        <div>
+                            <label htmlFor="femininity" className="block text-sm font-medium text-gray-700">
+                                Femininity Percentage: {femininityPercentage}%
+                            </label>
+                            <input
+                                type="range"
+                                id="femininity"
+                                min="0"
+                                max="100"
+                                value={femininityPercentage}
+                                onChange={(e) => setFemininityPercentage(e.target.value)}
+                                className="mt-1 w-full h-2 bg-purple-200 rounded-lg appearance-none cursor-pointer accent-purple-500"
+                            />
+                            <div className="flex justify-between text-xs text-gray-500 mt-1">
+                                <span>Masculine (0%)</span>
+                                <span>Feminine (100%)</span>
+                            </div>
+                            <p className="text-sm text-gray-600 mt-2">
+                                Adjust this slider to blend between masculine and feminine body composition calculations. This helps visualize changes over time or find an average range.
+                            </p>
+                        </div>
+
+                        <div className="mt-6">
+                            <h2 className="text-2xl font-bold text-purple-700">Calculated Results</h2>
+                            <div className="bg-purple-50 p-4 rounded-lg shadow-inner mt-4 space-y-2">
+                                <p className="text-lg font-semibold text-gray-800">BMI: <span className="text-purple-600">{calculatedBMI || 'N/A'}</span></p>
+                                <p className="text-lg font-semibold text-gray-800">Body Fat %: <span className="text-purple-600">{calculatedBF || 'N/A'}</span></p>
+                                <p className="text-lg font-semibold text-gray-800">Lean Mass ({unitSystem === 'imperial' ? 'lbs' : 'kg'}): <span className="text-purple-600">{calculatedLeanMass || 'N/A'}</span></p>
+                                <p className="text-lg font-semibold text-gray-800">Fat Mass ({unitSystem === 'imperial' ? 'lbs' : 'kg'}): <span className="text-purple-600">{calculatedFatMass || 'N/A'}</span></p>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label htmlFor="notes" className="block text-sm font-medium text-gray-700">Notes (e.g., HRT start date, surgery date)</label>
+                            <textarea
+                                id="notes"
+                                rows="3"
+                                value={notes}
+                                onChange={(e) => setNotes(e.target.value)}
+                                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-purple-500 focus:border-purple-500 sm:text-sm"
+                                placeholder="Add any relevant notes here..."
+                            ></textarea>
+                        </div>
+
+                        <div className="flex flex-col sm:flex-row gap-4 mt-6">
+                            <button
+                                onClick={handleCalculate}
+                                className="flex-1 bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 px-6 rounded-lg shadow-lg transform transition duration-300 ease-in-out hover:scale-105 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-opacity-75"
+                            >
+                                Calculate
+                            </button>
+                            <button
+                                onClick={handleSave}
+                                className="flex-1 bg-pink-500 hover:bg-pink-600 text-white font-bold py-3 px-6 rounded-lg shadow-lg transform transition duration-300 ease-in-out hover:scale-105 focus:outline-none focus:ring-2 focus:ring-pink-400 focus:ring-opacity-75"
+                            >
+                                Save Data
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div className="mt-8">
+                    <h2 className="text-2xl font-bold text-purple-700 mb-4">Your Progress Over Time</h2>
+                    <p className="text-sm text-gray-600 mb-4">
+                        Your User ID: <span className="font-mono text-purple-700 break-all">{userId || 'N/A'}</span>
+                    </p>
+                    <div className="h-80 w-full mb-8">
+                        {history.length > 0 ? (
+                            <Line data={chartData} options={chartOptions} />
+                        ) : (
+                            <p className="text-center text-gray-500">No data yet. Save your first entry to see your progress!</p>
+                        )}
+                    </div>
+
+                    <h3 className="text-xl font-bold text-purple-700 mb-3">Historical Entries</h3>
+                    {history.length === 0 ? (
+                        <p className="text-gray-500">No historical data available.</p>
+                    ) : (
+                        <div className="overflow-x-auto rounded-lg shadow-md">
+                            <table className="min-w-full divide-y divide-gray-200">
+                                <thead className="bg-purple-50">
+                                    <tr>
+                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider rounded-tl-lg">Date</th>
+                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Weight ({unitSystem === 'imperial' ? 'lbs' : 'kg'})</th>
+                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Height ({unitSystem === 'imperial' ? 'in' : 'cm'})</th>
+                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">BF %</th>
+                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Femininity %</th>
+                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Notes</th>
+                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider rounded-tr-lg">Units</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="bg-white divide-y divide-gray-200">
+                                    {history.map((entry) => (
+                                        <tr key={entry.id} className="hover:bg-gray-50">
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{entry.date}</td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{entry.weight}</td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{entry.height}</td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{entry.calculatedBF}</td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{entry.femininityPercentage}</td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{entry.notes || 'N/A'}</td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{entry.unitSystem || 'imperial'}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
+                    <div className="mt-6 flex justify-center">
+                        <button
+                            onClick={handleExportToCSV}
+                            className="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-lg shadow-lg transform transition duration-300 ease-in-out hover:scale-105 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-opacity-75"
+                        >
+                            Export Data to CSV
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+export default App;
